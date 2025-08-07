@@ -129,24 +129,48 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
     rapidapi_key = os.environ.get("RAPIDAPI_KEY")
     # Attempt RapidAPI if key provided
     if rapidapi_key:
+        # Primary call: market/v2/get-quotes.  This endpoint should return
+        # regularMarketPrice and regularMarketChange for most equities.  When
+        # the price or change is missing (as sometimes happens for ASX tickers),
+        # we fall back to stock/v2/get-summary to extract values from the nested
+        # "price" object.  Any exceptions are silently ignored so that
+        # downstream code can fall back to the public Yahoo endpoint.
         try:
-            rapid_url = "https://apidojo-yahoo-finance-v1.p.rapidapi.com/market/v2/get-quotes"
             headers = {
                 "x-rapidapi-host": "apidojo-yahoo-finance-v1.p.rapidapi.com",
                 "x-rapidapi-key": rapidapi_key,
             }
+            # First try market/v2/get-quotes
+            market_url = (
+                "https://apidojo-yahoo-finance-v1.p.rapidapi.com/market/v2/get-quotes"
+            )
             params = {"region": "AU", "symbols": ticker}
-            resp = requests.get(rapid_url, headers=headers, params=params, timeout=6)
+            resp = requests.get(market_url, headers=headers, params=params, timeout=6)
             resp.raise_for_status()
             data = resp.json()
             results = data.get("quoteResponse", {}).get("result", [])
             if results:
                 result = results[0]
-                return (
-                    result.get("regularMarketPrice"),
-                    result.get("regularMarketPreviousClose"),
-                    result.get("regularMarketChange"),
-                )
+                price = result.get("regularMarketPrice")
+                prev = result.get("regularMarketPreviousClose")
+                change = result.get("regularMarketChange")
+                # If we got a price and change, return immediately
+                if price is not None or prev is not None or change is not None:
+                    return price, prev, change
+            # If price or change missing, try stock/v2/get-summary
+            summary_url = (
+                "https://apidojo-yahoo-finance-v1.p.rapidapi.com/stock/v2/get-summary"
+            )
+            params2 = {"symbol": ticker, "region": "AU"}
+            resp2 = requests.get(summary_url, headers=headers, params=params2, timeout=6)
+            resp2.raise_for_status()
+            data2 = resp2.json()
+            price_info = data2.get("price", {}) or {}
+            price = price_info.get("regularMarketPrice", {}).get("raw")
+            prev_close = price_info.get("regularMarketPreviousClose", {}).get("raw")
+            change = price_info.get("regularMarketChange", {}).get("raw")
+            if price is not None or prev_close is not None or change is not None:
+                return price, prev_close, change
         except Exception:
             pass
     # Fallback to public Yahoo Finance endpoint
