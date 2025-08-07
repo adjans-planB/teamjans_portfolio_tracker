@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TeamJans Portfolio Tracker</title>
+    <!-- Bootstrap CSS -->
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+      integrity="sha384-XLHpvNwLfSC1qFDR68h1zvYr9gWmM/rs24kTx5c5NyEJD7BqXc9E+u6KDAdM8N1A"
+      crossorigin="anonymous"
+    />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+  </head>
+  <body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4">
+      <div class="container-fluid">
+        <a class="navbar-brand" href="{{ url_for('index') }}">TeamJans Portfolio Tracker</a>
+      </div>
+    </nav>
+    <div class="container">
+      {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+      <div class="mt-3">
+        {% for category, message in messages %}
+        <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+          {{ message }}
+          <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% endwith %}
+      {% block content %}{% endblock %}
+    </div>
+    <!-- Bootstrap Bundle JS (with Popper) -->
+    <script
+      src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"
+      integrity="sha384-qHU6py0RMtqkAyjMj8awnWs8lrSVDsWdlV/W8qAbM9SxZ8pMVYSin9UoO69pZrHA"
+      crossorigin="anonymous"
+    ></script>
+  </body>
+</html>

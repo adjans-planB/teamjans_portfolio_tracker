@@ -1,0 +1,54 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<h2 class="mb-4">Portfolio Dashboard</h2>
+<div class="row mb-4">
+  <div class="col-md-6">
+    <form class="row row-cols-lg-auto g-3 align-items-center" method="POST" action="{{ url_for('create_portfolio') }}">
+      <div class="col-12">
+        <label class="visually-hidden" for="portfolioName">Portfolio Name</label>
+        <input type="text" class="form-control" id="portfolioName" name="name" placeholder="New Portfolio Name" required />
+      </div>
+      <div class="col-12">
+        <button type="submit" class="btn btn-success">Create Portfolio</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% if portfolios %}
+<div class="table-responsive">
+  <table class="table table-bordered table-striped align-middle">
+    <thead class="table-light">
+      <tr>
+        <th>Name</th>
+        <th>Cash Balance (A$)</th>
+        <th>Current Value (A$)</th>
+        <th>Daily P/L (A$)</th>
+        <th>Total P/L (A$)</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in portfolios %}
+      <tr>
+        <td>{{ p.name }}</td>
+        <td>{{ '%.2f' % p.cash_balance }}</td>
+        <td>{{ '%.2f' % p.current_value }}</td>
+        <td class="{{ 'text-success' if p.daily_profit >= 0 else 'text-danger' }}">{{ '%.2f' % p.daily_profit }}</td>
+        <td class="{{ 'text-success' if p.total_profit >= 0 else 'text-danger' }}">{{ '%.2f' % p.total_profit }}</td>
+        <td>
+          <a href="{{ url_for('view_portfolio', portfolio_id=p.id) }}" class="btn btn-sm btn-primary">View</a>
+          <form class="d-inline" method="POST" action="{{ url_for('delete_portfolio', portfolio_id=p.id) }}" onsubmit="return confirm('Are you sure you want to delete this portfolio?');">
+            <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p>No portfolios found. Use the form above to create one.</p>
+{% endif %}
+{% endblock %}

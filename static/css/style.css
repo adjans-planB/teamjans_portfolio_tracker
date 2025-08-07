@@ -1,0 +1,17 @@
+/* Custom styles for TeamJans Portfolio Tracker */
+body {
+  padding-bottom: 40px;
+}
+
+.navbar-brand {
+  font-weight: bold;
+}
+
+table td,
+table th {
+  vertical-align: middle;
+}
+
+.card-title {
+  margin-bottom: 0.5rem;
+}
