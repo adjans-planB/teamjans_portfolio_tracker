@@ -42,58 +42,88 @@ the `get_stock_price` function accordingly.
 from __future__ import annotations
 
 import os
-import sqlite3
 from datetime import datetime
 from typing import List, Optional, Tuple
 
 import requests
 from flask import Flask, redirect, render_template, request, url_for, flash
 
+# Database libraries.  We use SQLAlchemy for cross‑database support so that
+# switching between SQLite and PostgreSQL requires minimal changes.  The
+# `create_engine` function constructs an engine from a URL and the `text`
+# helper allows execution of parameterised SQL statements with named
+# parameters.  RealDictRow mapping is achieved via the `.mappings()` method
+# on result objects, which returns dictionaries keyed by column names.
+from sqlalchemy import create_engine, text
+
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "teamjans-secret")
 
+# Path to the SQLite database file for local development.  When running on
+# Render with a PostgreSQL add‑on, the DATABASE_URL environment variable is
+# provided and SQLAlchemy will connect to that instead.
 DATABASE = os.path.join(os.path.dirname(__file__), "portfolio.db")
 
+# Construct a SQLAlchemy engine.  If a DATABASE_URL is set (as is the case
+# when using a managed PostgreSQL instance on Render), SQLAlchemy will
+# connect to PostgreSQL; otherwise it falls back to a local SQLite file.
+engine = create_engine(os.environ.get("DATABASE_URL") or f"sqlite:///{DATABASE}", future=True)
 
-def get_db_connection() -> sqlite3.Connection:
-    """Return a new database connection with row factory configured."""
-    conn = sqlite3.connect(DATABASE)
-    conn.row_factory = sqlite3.Row
-    return conn
-
+# Determine whether we are using PostgreSQL (for type handling and SQL
+# differences).  This allows us to adjust default values and parameter
+# bindings appropriately.
+DB_IS_POSTGRES = engine.url.get_backend_name() == "postgresql"
 
 def init_db() -> None:
-    """Initialise the database if tables do not exist."""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    # Create portfolios table
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS portfolios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            cash_balance REAL DEFAULT 0.0
+    """
+    Initialise the database if tables do not exist.
+
+    For PostgreSQL we use SERIAL primary keys and boolean types; for
+    SQLite we stick to INTEGER primary keys with AUTOINCREMENT and
+    integer flags for booleans.  This function runs within a
+    transactional context so that table creation statements are
+    committed automatically.
+    """
+    if DB_IS_POSTGRES:
+        create_portfolios = (
+            "CREATE TABLE IF NOT EXISTS portfolios ("
+            "id SERIAL PRIMARY KEY, "
+            "name TEXT NOT NULL, "
+            "cash_balance NUMERIC DEFAULT 0.0)"
         )
-        """
-    )
-    # Create holdings table
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS holdings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            portfolio_id INTEGER NOT NULL,
-            ticker TEXT NOT NULL,
-            quantity REAL NOT NULL,
-            purchase_price REAL NOT NULL,
-            purchase_date TEXT DEFAULT CURRENT_DATE,
-            sold INTEGER DEFAULT 0,
-            FOREIGN KEY (portfolio_id) REFERENCES portfolios (id)
+        create_holdings = (
+            "CREATE TABLE IF NOT EXISTS holdings ("
+            "id SERIAL PRIMARY KEY, "
+            "portfolio_id INTEGER NOT NULL REFERENCES portfolios(id), "
+            "ticker TEXT NOT NULL, "
+            "quantity NUMERIC NOT NULL, "
+            "purchase_price NUMERIC NOT NULL, "
+            "purchase_date DATE DEFAULT CURRENT_DATE, "
+            "sold BOOLEAN DEFAULT FALSE)"
         )
-        """
-    )
-    conn.commit()
-    conn.close()
+    else:
+        create_portfolios = (
+            "CREATE TABLE IF NOT EXISTS portfolios ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "name TEXT NOT NULL, "
+            "cash_balance REAL DEFAULT 0.0)"
+        )
+        create_holdings = (
+            "CREATE TABLE IF NOT EXISTS holdings ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "portfolio_id INTEGER NOT NULL, "
+            "ticker TEXT NOT NULL, "
+            "quantity REAL NOT NULL, "
+            "purchase_price REAL NOT NULL, "
+            "purchase_date TEXT DEFAULT CURRENT_DATE, "
+            "sold INTEGER DEFAULT 0, "
+            "FOREIGN KEY (portfolio_id) REFERENCES portfolios (id))"
+        )
+    # Execute the table creation statements
+    with engine.begin() as conn:
+        conn.execute(text(create_portfolios))
+        conn.execute(text(create_holdings))
 
 
 # Initialise the database immediately when the module is imported.  In
@@ -193,7 +223,7 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
     return None, None, None
 
 
-def calculate_portfolio_summary(portfolio: sqlite3.Row) -> dict:
+def calculate_portfolio_summary(portfolio: dict) -> dict:
     """
     Compute summary statistics for a single portfolio.
 
@@ -203,7 +233,7 @@ def calculate_portfolio_summary(portfolio: sqlite3.Row) -> dict:
 
     Parameters
     ----------
-    portfolio : sqlite3.Row
+    portfolio : dict
         The portfolio record retrieved from the database.
 
     Returns
@@ -212,12 +242,21 @@ def calculate_portfolio_summary(portfolio: sqlite3.Row) -> dict:
         A dictionary containing summary fields such as current value,
         total profit/loss and daily profit/loss.
     """
-    conn = get_db_connection()
-    holdings = conn.execute(
-        "SELECT * FROM holdings WHERE portfolio_id = ? AND sold = 0",
-        (portfolio["id"],),
-    ).fetchall()
-    conn.close()
+    # Fetch unsold holdings for this portfolio.  The `sold` column is a
+    # boolean in PostgreSQL and an integer (0/1) in SQLite.  Use the
+    # appropriate value based on the backend.
+    unsold_val = False if DB_IS_POSTGRES else 0
+    with engine.connect() as conn:
+        holdings = (
+            conn.execute(
+                text(
+                    "SELECT * FROM holdings WHERE portfolio_id = :pid AND sold = :sold"
+                ),
+                {"pid": portfolio["id"], "sold": unsold_val},
+            )
+            .mappings()
+            .all()
+        )
 
     total_value = portfolio["cash_balance"]
     total_profit = 0.0
@@ -255,9 +294,11 @@ def calculate_portfolio_summary(portfolio: sqlite3.Row) -> dict:
 @app.route("/")
 def index():
     """Display the dashboard with a summary of all portfolios."""
-    conn = get_db_connection()
-    portfolios = conn.execute("SELECT * FROM portfolios").fetchall()
-    conn.close()
+    # Retrieve all portfolios.  Use `.mappings().all()` to return a list of
+    # dictionaries keyed by column names.  This allows us to treat rows
+    # similarly regardless of backend.
+    with engine.connect() as conn:
+        portfolios = conn.execute(text("SELECT * FROM portfolios")).mappings().all()
     summaries = [calculate_portfolio_summary(p) for p in portfolios]
     return render_template("index.html", portfolios=summaries)
 
@@ -265,21 +306,41 @@ def index():
 @app.route("/portfolio/<int:portfolio_id>")
 def view_portfolio(portfolio_id: int):
     """Display a single portfolio with its holdings and actions."""
-    conn = get_db_connection()
-    portfolio = conn.execute(
-        "SELECT * FROM portfolios WHERE id = ?", (portfolio_id,)
-    ).fetchone()
-    if portfolio is None:
-        conn.close()
-        flash("Portfolio not found.", "danger")
-        return redirect(url_for("index"))
-    holdings = conn.execute(
-        "SELECT * FROM holdings WHERE portfolio_id = ? AND sold = 0", (portfolio_id,)
-    ).fetchall()
-    sold_holdings = conn.execute(
-        "SELECT * FROM holdings WHERE portfolio_id = ? AND sold = 1", (portfolio_id,)
-    ).fetchall()
-    conn.close()
+    # Determine unsold/sold flag values based on backend
+    unsold_val = False if DB_IS_POSTGRES else 0
+    sold_val = True if DB_IS_POSTGRES else 1
+    with engine.connect() as conn:
+        portfolio = (
+            conn.execute(
+                text("SELECT * FROM portfolios WHERE id = :pid"),
+                {"pid": portfolio_id},
+            )
+            .mappings()
+            .first()
+        )
+        if portfolio is None:
+            flash("Portfolio not found.", "danger")
+            return redirect(url_for("index"))
+        holdings = (
+            conn.execute(
+                text(
+                    "SELECT * FROM holdings WHERE portfolio_id = :pid AND sold = :sold"
+                ),
+                {"pid": portfolio_id, "sold": unsold_val},
+            )
+            .mappings()
+            .all()
+        )
+        sold_holdings = (
+            conn.execute(
+                text(
+                    "SELECT * FROM holdings WHERE portfolio_id = :pid AND sold = :sold"
+                ),
+                {"pid": portfolio_id, "sold": sold_val},
+            )
+            .mappings()
+            .all()
+        )
 
     # Compute metrics for each holding
     holding_rows = []
@@ -327,10 +388,13 @@ def create_portfolio():
     if not name:
         flash("Portfolio name is required.", "danger")
         return redirect(url_for("index"))
-    conn = get_db_connection()
-    conn.execute("INSERT INTO portfolios (name) VALUES (?)", (name,))
-    conn.commit()
-    conn.close()
+    # Insert a new portfolio using a transactional block.  SQLAlchemy will
+    # automatically commit when exiting the context.
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO portfolios (name) VALUES (:name)"),
+            {"name": name},
+        )
     flash(f"Portfolio '{name}' created successfully.", "success")
     return redirect(url_for("index"))
 
@@ -358,14 +422,17 @@ def add_holding(portfolio_id: int):
     # already present (e.g. 'BHP.AX' or 'XYZ.NZ') we leave it unchanged.
     if "." not in ticker:
         ticker = f"{ticker}.AX"
-    conn = get_db_connection()
-    conn.execute(
-        "INSERT INTO holdings (portfolio_id, ticker, quantity, purchase_price)"
-        " VALUES (?, ?, ?, ?)",
-        (portfolio_id, ticker, quantity_val, price_val),
-    )
-    conn.commit()
-    conn.close()
+    # Insert the new holding.  Use a transactional block to ensure the
+    # operation commits.  For booleans we rely on SQLAlchemy to cast
+    # Python types to the appropriate database type.
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO holdings (portfolio_id, ticker, quantity, purchase_price) "
+                "VALUES (:pid, :ticker, :qty, :price)"
+            ),
+            {"pid": portfolio_id, "ticker": ticker, "qty": quantity_val, "price": price_val},
+        )
     flash(f"Added {quantity_val} units of {ticker} to the portfolio.", "success")
     return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
 
@@ -382,39 +449,53 @@ def sell_holding(portfolio_id: int, holding_id: int):
     retrieved, the purchase price is used instead.  The record remains
     in the holdings table but is flagged as sold.
     """
-    conn = get_db_connection()
-    holding = conn.execute(
-        "SELECT * FROM holdings WHERE id = ? AND portfolio_id = ?",
-        (holding_id, portfolio_id),
-    ).fetchone()
-    if not holding:
-        conn.close()
-        flash("Holding not found.", "danger")
-        return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
-    if holding["sold"]:
-        conn.close()
-        flash("This holding has already been sold.", "warning")
-        return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
-    # Get current price
-    current_price, _, _ = get_stock_price(holding["ticker"])
-    sale_price = current_price if current_price is not None else holding["purchase_price"]
-    proceeds = sale_price * holding["quantity"]
-    # Update cash balance
-    portfolio = conn.execute(
-        "SELECT * FROM portfolios WHERE id = ?", (portfolio_id,)
-    ).fetchone()
-    new_balance = portfolio["cash_balance"] + proceeds
-    conn.execute(
-        "UPDATE portfolios SET cash_balance = ? WHERE id = ?",
-        (new_balance, portfolio_id),
-    )
-    # Mark holding as sold
-    conn.execute(
-        "UPDATE holdings SET sold = 1 WHERE id = ?",
-        (holding_id,),
-    )
-    conn.commit()
-    conn.close()
+    # Determine the sold flag value for the target database
+    sold_val = True if DB_IS_POSTGRES else 1
+    unsold_val = False if DB_IS_POSTGRES else 0
+    # Perform the sale within a transactional block so that the read and
+    # writes occur atomically.  Fetch the holding, compute the proceeds and
+    # update both the portfolio and the holding record.
+    with engine.begin() as conn:
+        holding = (
+            conn.execute(
+                text(
+                    "SELECT * FROM holdings WHERE id = :hid AND portfolio_id = :pid"
+                ),
+                {"hid": holding_id, "pid": portfolio_id},
+            )
+            .mappings()
+            .first()
+        )
+        if not holding:
+            flash("Holding not found.", "danger")
+            return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
+        if holding["sold"]:
+            flash("This holding has already been sold.", "warning")
+            return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
+        # Get current price
+        current_price, _, _ = get_stock_price(holding["ticker"])
+        sale_price = current_price if current_price is not None else holding["purchase_price"]
+        proceeds = sale_price * holding["quantity"]
+        # Fetch portfolio to compute new cash balance
+        portfolio = (
+            conn.execute(
+                text("SELECT * FROM portfolios WHERE id = :pid"),
+                {"pid": portfolio_id},
+            )
+            .mappings()
+            .first()
+        )
+        new_balance = portfolio["cash_balance"] + proceeds
+        # Update cash balance
+        conn.execute(
+            text("UPDATE portfolios SET cash_balance = :bal WHERE id = :pid"),
+            {"bal": new_balance, "pid": portfolio_id},
+        )
+        # Mark holding as sold
+        conn.execute(
+            text("UPDATE holdings SET sold = :sold WHERE id = :hid"),
+            {"sold": sold_val, "hid": holding_id},
+        )
     flash(
         f"Sold {holding['quantity']} units of {holding['ticker']} for {sale_price:.2f} each. "
         f"Proceeds credited to cash balance.",
@@ -434,13 +515,12 @@ def update_cash(portfolio_id: int):
     except Exception:
         flash("Cash balance must be a number.", "danger")
         return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
-    conn = get_db_connection()
-    conn.execute(
-        "UPDATE portfolios SET cash_balance = ? WHERE id = ?",
-        (balance_val, portfolio_id),
-    )
-    conn.commit()
-    conn.close()
+    # Update cash balance in a transactional block
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE portfolios SET cash_balance = :bal WHERE id = :pid"),
+            {"bal": balance_val, "pid": portfolio_id},
+        )
     flash("Cash balance updated.", "success")
     return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
 
@@ -450,11 +530,16 @@ def update_cash(portfolio_id: int):
 )
 def delete_portfolio(portfolio_id: int):
     """Delete a portfolio and all its holdings."""
-    conn = get_db_connection()
-    conn.execute("DELETE FROM holdings WHERE portfolio_id = ?", (portfolio_id,))
-    conn.execute("DELETE FROM portfolios WHERE id = ?", (portfolio_id,))
-    conn.commit()
-    conn.close()
+    # Remove the portfolio and all its holdings in a single transaction
+    with engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM holdings WHERE portfolio_id = :pid"),
+            {"pid": portfolio_id},
+        )
+        conn.execute(
+            text("DELETE FROM portfolios WHERE id = :pid"),
+            {"pid": portfolio_id},
+        )
     flash("Portfolio deleted.", "success")
     return redirect(url_for("index"))
 

@@ -1,3 +1,5 @@
 Flask==3.1.1
 requests==2.32.4
+SQLAlchemy
+psycopg2-binary
 gunicorn==21.2.0
