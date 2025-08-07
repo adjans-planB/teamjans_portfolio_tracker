@@ -274,21 +274,32 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
         quantity = h["quantity"]
         purchase_price = h["purchase_price"]
         current_price, prev_close, change = get_stock_price(ticker)
+        # If the API returns a valid current price, use it.  If the
+        # current price is missing but a previous close is available
+        # (e.g. when the market is closed), fall back to the previous
+        # close.  Otherwise, use the purchase price so that the
+        # portfolio value remains defined.
         if current_price is not None:
-            position_value = current_price * quantity
-            positions_value += position_value
-            total_profit += (current_price - purchase_price) * quantity
-            # Use explicit change value if present; otherwise fall back to
-            # computing from previous close.  This ensures a non-zero
-            # daily P/L when the API omits regularMarketPreviousClose.
-            if change is not None:
-                daily_profit += change * quantity
-            elif prev_close is not None:
-                daily_profit += (current_price - prev_close) * quantity
+            effective_price = current_price
+        elif prev_close is not None:
+            effective_price = prev_close
         else:
-            # If price not available, fall back to purchase price
-            position_value = purchase_price * quantity
-            positions_value += position_value
+            effective_price = purchase_price
+        # Accumulate the position value based on the effective price
+        position_value = effective_price * quantity
+        positions_value += position_value
+        # Calculate profit relative to purchase price using the
+        # effective price.
+        total_profit += (effective_price - purchase_price) * quantity
+        # Compute daily profit: when the API supplies a change value we
+        # multiply it by quantity; if only previous close is
+        # available, daily profit is the difference between the
+        # effective price and the previous close; otherwise leave
+        # unchanged (zero contribution).
+        if change is not None:
+            daily_profit += change * quantity
+        elif current_price is not None and prev_close is not None:
+            daily_profit += (current_price - prev_close) * quantity
     # Net worth equals cash plus positions value
     net_worth = portfolio["cash_balance"] + positions_value
     return {
@@ -365,20 +376,27 @@ def view_portfolio(portfolio_id: int):
             "current_price": current_price,
             "prev_close": prev_close,
         }
+        # Determine an effective price: if the market price is available,
+        # use it; otherwise fall back to the previous close when
+        # available; if neither is available, use the purchase price.
         if current_price is not None:
-            metrics["value"] = current_price * h["quantity"]
-            metrics["profit_total"] = (current_price - h["purchase_price"]) * h["quantity"]
-            # Compute daily profit using change value when available.  This
-            # handles cases where the previous close is omitted by the API.
-            if change is not None:
-                metrics["profit_daily"] = change * h["quantity"]
-            elif prev_close is not None:
-                metrics["profit_daily"] = (current_price - prev_close) * h["quantity"]
-            else:
-                metrics["profit_daily"] = None
+            effective_price = current_price
+        elif prev_close is not None:
+            effective_price = prev_close
         else:
-            metrics["value"] = h["purchase_price"] * h["quantity"]
-            metrics["profit_total"] = 0.0
+            effective_price = h["purchase_price"]
+        # Position value and total profit based on the effective price
+        metrics["value"] = effective_price * h["quantity"]
+        metrics["profit_total"] = (effective_price - h["purchase_price"]) * h["quantity"]
+        # Compute daily profit.  When the API supplies a change value,
+        # multiply by quantity.  Otherwise, if both current price and
+        # previous close are available, compute the difference.  If
+        # neither is available, daily profit is undefined (None).
+        if change is not None:
+            metrics["profit_daily"] = change * h["quantity"]
+        elif current_price is not None and prev_close is not None:
+            metrics["profit_daily"] = (current_price - prev_close) * h["quantity"]
+        else:
             metrics["profit_daily"] = None
         holding_rows.append(metrics)
 
