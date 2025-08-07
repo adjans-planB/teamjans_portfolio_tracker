@@ -1,1 +1,2 @@
-web: gunicorn teamjans_portfolio_tracker.app:app
+web: gunicorn app:app
+
