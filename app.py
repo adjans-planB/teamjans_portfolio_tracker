@@ -103,14 +103,18 @@ def init_db() -> None:
 init_db()
 
 
-def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float]]:
+def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
-    Retrieve the current and previous close price for a given ticker.
+    Retrieve current price, previous close and change for a ticker.
 
-    The function uses Yahoo Finance's public quote endpoint.  It returns
-    a tuple `(current_price, previous_close)` or `(None, None)` if the
-    price cannot be retrieved (e.g. network issue or invalid ticker).
-    
+    The function first attempts to query the Yahoo Finance API via the
+    RapidAPI gateway when a `RAPIDAPI_KEY` environment variable is
+    provided.  RapidAPI offers a more reliable feed that is less
+    susceptible to rate limiting.  If no key is present it falls back
+    to Yahoo Finance’s public quote endpoint.  On success it returns a
+    tuple ``(current_price, previous_close, change)``; otherwise
+    `(None, None, None)`.
+
     Parameters
     ----------
     ticker : str
@@ -118,13 +122,37 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float]]:
 
     Returns
     -------
-    Tuple[Optional[float], Optional[float]]
-        The current market price and previous closing price.  Either
-        element may be `None` if unavailable.
+    Tuple[Optional[float], Optional[float], Optional[float]]
+        A tuple of ``(current_price, previous_close, change)`` where any
+        element may be ``None`` if unavailable.
     """
-    url = "https://query1.finance.yahoo.com/v7/finance/quote"
-    params = {"symbols": ticker}
+    rapidapi_key = os.environ.get("RAPIDAPI_KEY")
+    # Attempt RapidAPI if key provided
+    if rapidapi_key:
+        try:
+            rapid_url = "https://apidojo-yahoo-finance-v1.p.rapidapi.com/market/v2/get-quotes"
+            headers = {
+                "x-rapidapi-host": "apidojo-yahoo-finance-v1.p.rapidapi.com",
+                "x-rapidapi-key": rapidapi_key,
+            }
+            params = {"region": "AU", "symbols": ticker}
+            resp = requests.get(rapid_url, headers=headers, params=params, timeout=6)
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("quoteResponse", {}).get("result", [])
+            if results:
+                result = results[0]
+                return (
+                    result.get("regularMarketPrice"),
+                    result.get("regularMarketPreviousClose"),
+                    result.get("regularMarketChange"),
+                )
+        except Exception:
+            pass
+    # Fallback to public Yahoo Finance endpoint
     try:
+        url = "https://query1.finance.yahoo.com/v7/finance/quote"
+        params = {"symbols": ticker}
         resp = requests.get(url, params=params, timeout=6)
         resp.raise_for_status()
         data = resp.json()
@@ -134,10 +162,11 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float]]:
             return (
                 result.get("regularMarketPrice"),
                 result.get("regularMarketPreviousClose"),
+                result.get("regularMarketChange"),
             )
     except Exception:
         pass
-    return None, None
+    return None, None, None
 
 
 def calculate_portfolio_summary(portfolio: sqlite3.Row) -> dict:
@@ -173,12 +202,17 @@ def calculate_portfolio_summary(portfolio: sqlite3.Row) -> dict:
         ticker = h["ticker"]
         quantity = h["quantity"]
         purchase_price = h["purchase_price"]
-        current_price, prev_close = get_stock_price(ticker)
+        current_price, prev_close, change = get_stock_price(ticker)
         if current_price is not None:
             position_value = current_price * quantity
             total_value += position_value
             total_profit += (current_price - purchase_price) * quantity
-            if prev_close is not None:
+            # Use explicit change value if present; otherwise fall back to
+            # computing from previous close.  This ensures a non-zero
+            # daily P/L when the API omits regularMarketPreviousClose.
+            if change is not None:
+                daily_profit += change * quantity
+            elif prev_close is not None:
                 daily_profit += (current_price - prev_close) * quantity
         else:
             # If price not available, fall back to purchase price
@@ -226,7 +260,7 @@ def view_portfolio(portfolio_id: int):
     # Compute metrics for each holding
     holding_rows = []
     for h in holdings:
-        current_price, prev_close = get_stock_price(h["ticker"])
+        current_price, prev_close, change = get_stock_price(h["ticker"])
         metrics = {
             "id": h["id"],
             "ticker": h["ticker"],
@@ -238,7 +272,11 @@ def view_portfolio(portfolio_id: int):
         if current_price is not None:
             metrics["value"] = current_price * h["quantity"]
             metrics["profit_total"] = (current_price - h["purchase_price"]) * h["quantity"]
-            if prev_close is not None:
+            # Compute daily profit using change value when available.  This
+            # handles cases where the previous close is omitted by the API.
+            if change is not None:
+                metrics["profit_daily"] = change * h["quantity"]
+            elif prev_close is not None:
                 metrics["profit_daily"] = (current_price - prev_close) * h["quantity"]
             else:
                 metrics["profit_daily"] = None
@@ -291,6 +329,11 @@ def add_holding(portfolio_id: int):
     if not ticker:
         flash("Ticker code is required.", "danger")
         return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
+    # If the user enters a bare ASX code (e.g. BHP), append '.AX' so that
+    # Yahoo Finance recognises it as an Australian listing.  If a dot is
+    # already present (e.g. 'BHP.AX' or 'XYZ.NZ') we leave it unchanged.
+    if "." not in ticker:
+        ticker = f"{ticker}.AX"
     conn = get_db_connection()
     conn.execute(
         "INSERT INTO holdings (portfolio_id, ticker, quantity, purchase_price)"
@@ -329,7 +372,7 @@ def sell_holding(portfolio_id: int, holding_id: int):
         flash("This holding has already been sold.", "warning")
         return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
     # Get current price
-    current_price, _ = get_stock_price(holding["ticker"])
+    current_price, _, _ = get_stock_price(holding["ticker"])
     sale_price = current_price if current_price is not None else holding["purchase_price"]
     proceeds = sale_price * holding["quantity"]
     # Update cash balance
