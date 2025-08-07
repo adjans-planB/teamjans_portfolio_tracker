@@ -8,7 +8,8 @@
       <div class="card-body">
         <h5 class="card-title">Summary</h5>
         <p class="mb-1"><strong>Cash Balance:</strong> A${{ '%.2f' % summary.cash_balance }}</p>
-        <p class="mb-1"><strong>Portfolio Value:</strong> A${{ '%.2f' % summary.current_value }}</p>
+        <p class="mb-1"><strong>Portfolio Value:</strong> A${{ '%.2f' % summary.positions_value }}</p>
+        <p class="mb-1"><strong>Total Net Worth:</strong> A${{ '%.2f' % summary.net_worth }}</p>
         <p class="mb-1"><strong>Daily P/L:</strong> <span class="{{ 'text-success' if summary.daily_profit >= 0 else 'text-danger' }}">A${{ '%.2f' % summary.daily_profit }}</span></p>
         <p class="mb-0"><strong>Total P/L:</strong> <span class="{{ 'text-success' if summary.total_profit >= 0 else 'text-danger' }}">A${{ '%.2f' % summary.total_profit }}</span></p>
       </div>

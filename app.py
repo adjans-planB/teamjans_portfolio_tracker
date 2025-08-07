@@ -228,8 +228,16 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
     Compute summary statistics for a single portfolio.
 
     Fetches all unsold holdings for the portfolio, obtains live quotes
-    for each ticker, computes the current value of each position and
-    calculates total and daily profit or loss.
+    for each ticker, computes the current market value of each position
+    (excluding cash) and calculates total and daily profit or loss.
+
+    The returned dictionary includes the following keys:
+
+    ``cash_balance``: the cash available in the portfolio;
+    ``positions_value``: the combined market value of all open holdings;
+    ``net_worth``: cash balance plus positions value;
+    ``total_profit``: cumulative profit or loss relative to purchase price;
+    ``daily_profit``: change in value since the previous close.
 
     Parameters
     ----------
@@ -239,8 +247,7 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
     Returns
     -------
     dict
-        A dictionary containing summary fields such as current value,
-        total profit/loss and daily profit/loss.
+        A dictionary containing summary fields described above.
     """
     # Fetch unsold holdings for this portfolio.  The `sold` column is a
     # boolean in PostgreSQL and an integer (0/1) in SQLite.  Use the
@@ -258,7 +265,8 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
             .all()
         )
 
-    total_value = portfolio["cash_balance"]
+    # Accumulate the value of open positions (excluding cash) and profits
+    positions_value = 0.0
     total_profit = 0.0
     daily_profit = 0.0
     for h in holdings:
@@ -268,7 +276,7 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
         current_price, prev_close, change = get_stock_price(ticker)
         if current_price is not None:
             position_value = current_price * quantity
-            total_value += position_value
+            positions_value += position_value
             total_profit += (current_price - purchase_price) * quantity
             # Use explicit change value if present; otherwise fall back to
             # computing from previous close.  This ensures a non-zero
@@ -280,12 +288,15 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
         else:
             # If price not available, fall back to purchase price
             position_value = purchase_price * quantity
-            total_value += position_value
+            positions_value += position_value
+    # Net worth equals cash plus positions value
+    net_worth = portfolio["cash_balance"] + positions_value
     return {
         "id": portfolio["id"],
         "name": portfolio["name"],
         "cash_balance": portfolio["cash_balance"],
-        "current_value": total_value,
+        "positions_value": positions_value,
+        "net_worth": net_worth,
         "total_profit": total_profit,
         "daily_profit": daily_profit,
     }
@@ -422,10 +433,26 @@ def add_holding(portfolio_id: int):
     # already present (e.g. 'BHP.AX' or 'XYZ.NZ') we leave it unchanged.
     if "." not in ticker:
         ticker = f"{ticker}.AX"
-    # Insert the new holding.  Use a transactional block to ensure the
-    # operation commits.  For booleans we rely on SQLAlchemy to cast
-    # Python types to the appropriate database type.
+    # Compute the value of the purchase.  We deduct this from the
+    # portfolio's cash balance to reflect the cost of buying the
+    # holding.  If the portfolio has insufficient cash, the balance
+    # may go negative.
+    purchase_value = quantity_val * price_val
     with engine.begin() as conn:
+        # Fetch current cash balance
+        portfolio = (
+            conn.execute(
+                text("SELECT cash_balance FROM portfolios WHERE id = :pid"),
+                {"pid": portfolio_id},
+            )
+            .mappings()
+            .first()
+        )
+        if portfolio is None:
+            flash("Portfolio not found.", "danger")
+            return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
+        new_balance = portfolio["cash_balance"] - purchase_value
+        # Insert the new holding
         conn.execute(
             text(
                 "INSERT INTO holdings (portfolio_id, ticker, quantity, purchase_price) "
@@ -433,7 +460,16 @@ def add_holding(portfolio_id: int):
             ),
             {"pid": portfolio_id, "ticker": ticker, "qty": quantity_val, "price": price_val},
         )
-    flash(f"Added {quantity_val} units of {ticker} to the portfolio.", "success")
+        # Update cash balance
+        conn.execute(
+            text("UPDATE portfolios SET cash_balance = :bal WHERE id = :pid"),
+            {"bal": new_balance, "pid": portfolio_id},
+        )
+    flash(
+        f"Added {quantity_val} units of {ticker} to the portfolio. "
+        f"Cash balance decreased by A${purchase_value:.2f}.",
+        "success",
+    )
     return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
 
 
