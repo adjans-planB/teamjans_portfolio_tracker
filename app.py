@@ -209,7 +209,7 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
             change = price_info.get("regularMarketChange", {}).get("raw")
             if price is not None or prev_close is not None or change is not None:
                 return price, prev_close, change
-	    print(f"[DEBUG] Fallback summary response for {ticker}: {data2}")
+            print(f"[DEBUG] Fallback summary response for {ticker}: {data2}")
 	
         except Exception:
             pass
