@@ -292,11 +292,11 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
         else:
             effective_price = purchase_price
         # Accumulate the position value based on the effective price
-        position_value = effective_price * quantity
+        position_value = float(effective_price) * quantity
         positions_value += position_value
         # Calculate profit relative to purchase price using the
         # effective price.
-        total_profit += (effective_price - purchase_price) * quantity
+        total_profit += (float(effective_price) - float(purchase_price)) * quantity
         # Compute daily profit: when the API supplies a change value we
         # multiply it by quantity; if only previous close is
         # available, daily profit is the difference between the
