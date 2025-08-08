@@ -232,32 +232,7 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
 def calculate_portfolio_summary(portfolio: dict) -> dict:
     """
     Compute summary statistics for a single portfolio.
-
-    Fetches all unsold holdings for the portfolio, obtains live quotes
-    for each ticker, computes the current market value of each position
-    (excluding cash) and calculates total and daily profit or loss.
-
-    The returned dictionary includes the following keys:
-
-    ``cash_balance``: the cash available in the portfolio;
-    ``positions_value``: the combined market value of all open holdings;
-    ``net_worth``: cash balance plus positions value;
-    ``total_profit``: cumulative profit or loss relative to purchase price;
-    ``daily_profit``: change in value since the previous close.
-
-    Parameters
-    ----------
-    portfolio : dict
-        The portfolio record retrieved from the database.
-
-    Returns
-    -------
-    dict
-        A dictionary containing summary fields described above.
     """
-    # Fetch unsold holdings for this portfolio.  The `sold` column is a
-    # boolean in PostgreSQL and an integer (0/1) in SQLite.  Use the
-    # appropriate value based on the backend.
     unsold_val = False if DB_IS_POSTGRES else 0
     with engine.connect() as conn:
         holdings = (
@@ -271,51 +246,36 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
             .all()
         )
 
-    # Accumulate the value of open positions (excluding cash) and profits
     positions_value = 0.0
     total_profit = 0.0
     daily_profit = 0.0
     for h in holdings:
         ticker = h["ticker"]
-        quantity = h["quantity"]
-        purchase_price = h["purchase_price"]
+        quantity = float(h["quantity"])
+        purchase_price = float(h["purchase_price"])
         current_price, prev_close, change = get_stock_price(ticker)
-        # If the API returns a valid current price, use it.  If the
-        # current price is missing but a previous close is available
-        # (e.g. when the market is closed), fall back to the previous
-        # close.  Otherwise, use the purchase price so that the
-        # portfolio value remains defined.
+
         if current_price is not None:
             effective_price = current_price
         elif prev_close is not None:
             effective_price = prev_close
         else:
             effective_price = purchase_price
-        # Accumulate the position value based on the effective price
-	price = float(effective_price)
-	qty = float(quantity)
-	cost = float(purchase_price)
 
-	position_value = price * qty
-	positions_value += position_value
-	total_profit += (price - cost) * qty
-        # Calculate profit relative to purchase price using the
-        # effective price.
-        total_profit += (price - cost) * quantity
-        # Compute daily profit: when the API supplies a change value we
-        # multiply it by quantity; if only previous close is
-        # available, daily profit is the difference between the
-        # effective price and the previous close; otherwise leave
-        # unchanged (zero contribution).
+        price = float(effective_price)
+        position_value = price * quantity
+        positions_value += position_value
+        total_profit += (price - purchase_price) * quantity
+
         if change is not None:
-            daily_profit += change * quantity
+            daily_profit += float(change) * quantity
         elif current_price is not None and prev_close is not None:
-            daily_profit += (current_price - prev_close) * quantity
-# Convert cash_balance to float.  In PostgreSQL NUMERIC values are returned
-    # as decimal.Decimal, which can't be added to floats directly.
+            daily_profit += (float(current_price) - float(prev_close)) * quantity
+
     cash_balance = portfolio["cash_balance"]
     cash_float = float(cash_balance) if cash_balance is not None else 0.0
     net_worth = cash_float + positions_value
+
     return {
         "id": portfolio["id"],
         "name": portfolio["name"],
