@@ -301,7 +301,9 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
         elif current_price is not None and prev_close is not None:
             daily_profit += (current_price - prev_close) * quantity
     # Net worth equals cash plus positions value
-    net_worth = portfolio["cash_balance"] + positions_value
+	cash_balance = portfolio["cash_balance"]
+	cash_float = float(cash_balance) if cash_balance is not None else 0.0
+	net_worth = cash_float + positions_value
     return {
         "id": portfolio["id"],
         "name": portfolio["name"],
