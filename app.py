@@ -65,10 +65,16 @@ app.secret_key = os.environ.get("SECRET_KEY", "teamjans-secret")
 # provided and SQLAlchemy will connect to that instead.
 DATABASE = os.path.join(os.path.dirname(__file__), "portfolio.db")
 
-# Construct a SQLAlchemy engine.  If a DATABASE_URL is set (as is the case
-# when using a managed PostgreSQL instance on Render), SQLAlchemy will
-# connect to PostgreSQL; otherwise it falls back to a local SQLite file.
-engine = create_engine(os.environ.get("DATABASE_URL") or f"sqlite:///{DATABASE}", future=True)
+# Construct a SQLAlchemy engine.  When a DATABASE_URL environment variable
+# is provided, use it to connect to PostgreSQL.  Some providers return a
+# URL starting with "postgres://", which SQLAlchemy 2.x doesn't recognise.
+db_url = os.environ.get("DATABASE_URL")
+if db_url:
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql://", 1)
+    engine = create_engine(db_url, future=True)
+else:
+    engine = create_engine(f"sqlite:///{DATABASE}", future=True)
 
 # Determine whether we are using PostgreSQL (for type handling and SQL
 # differences).  This allows us to adjust default values and parameter
@@ -300,20 +306,20 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
             daily_profit += change * quantity
         elif current_price is not None and prev_close is not None:
             daily_profit += (current_price - prev_close) * quantity
-    # Net worth equals cash plus positions value
-	cash_balance = portfolio["cash_balance"]
-	cash_float = float(cash_balance) if cash_balance is not None else 0.0
-	net_worth = cash_float + positions_value
+# Convert cash_balance to float.  In PostgreSQL NUMERIC values are returned
+    # as decimal.Decimal, which can't be added to floats directly.
+    cash_balance = portfolio["cash_balance"]
+    cash_float = float(cash_balance) if cash_balance is not None else 0.0
+    net_worth = cash_float + positions_value
     return {
         "id": portfolio["id"],
         "name": portfolio["name"],
-        "cash_balance": portfolio["cash_balance"],
+        "cash_balance": cash_float,
         "positions_value": positions_value,
         "net_worth": net_worth,
         "total_profit": total_profit,
         "daily_profit": daily_profit,
     }
-
 
 @app.route("/")
 def index():
@@ -471,7 +477,10 @@ def add_holding(portfolio_id: int):
         if portfolio is None:
             flash("Portfolio not found.", "danger")
             return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
-        new_balance = portfolio["cash_balance"] - purchase_value
+       # Convert cash_balance to float to avoid Decimal–float TypeError on PostgreSQL
+        cash_balance = portfolio["cash_balance"]
+        cash_float = float(cash_balance) if cash_balance is not None else 0.0
+        new_balance = cash_float - purchase_value
         # Insert the new holding
         conn.execute(
             text(
@@ -541,7 +550,10 @@ def sell_holding(portfolio_id: int, holding_id: int):
             .mappings()
             .first()
         )
-        new_balance = portfolio["cash_balance"] + proceeds
+        # Convert cash_balance to float to avoid Decimal–float TypeError on PostgreSQL
+        cash_balance = portfolio["cash_balance"]
+        cash_float = float(cash_balance) if cash_balance is not None else 0.0
+        new_balance = cash_float + proceeds
         # Update cash balance
         conn.execute(
             text("UPDATE portfolios SET cash_balance = :bal WHERE id = :pid"),
