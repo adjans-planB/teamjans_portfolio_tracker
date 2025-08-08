@@ -184,6 +184,8 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
             resp = requests.get(market_url, headers=headers, params=params, timeout=6)
             resp.raise_for_status()
             data = resp.json()
+	    print(f"[DEBUG] Primary API response for {ticker}: {data}")
+
             results = data.get("quoteResponse", {}).get("result", [])
             if results:
                 result = results[0]
@@ -207,6 +209,8 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
             change = price_info.get("regularMarketChange", {}).get("raw")
             if price is not None or prev_close is not None or change is not None:
                 return price, prev_close, change
+	    print(f"[DEBUG] Fallback summary response for {ticker}: {data2}")
+	
         except Exception:
             pass
     # Fallback to public Yahoo Finance endpoint
@@ -224,6 +228,9 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
                 result.get("regularMarketPreviousClose"),
                 result.get("regularMarketChange"),
             )
+	print(f"[DEBUG] Public Yahoo fallback for {ticker}: {data}")
+
+
     except Exception:
         pass
     return None, None, None
