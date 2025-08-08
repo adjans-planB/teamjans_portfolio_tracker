@@ -292,13 +292,13 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
         else:
             effective_price = purchase_price
         # Accumulate the position value based on the effective price
-price = float(effective_price)
-qty = float(quantity)
-cost = float(purchase_price)
+	price = float(effective_price)
+	qty = float(quantity)
+	cost = float(purchase_price)
 
-position_value = price * qty
-positions_value += position_value
-total_profit += (price - cost) * qty
+	position_value = price * qty
+	positions_value += position_value
+	total_profit += (price - cost) * qty
         # Calculate profit relative to purchase price using the
         # effective price.
         total_profit += (price - cost) * quantity
