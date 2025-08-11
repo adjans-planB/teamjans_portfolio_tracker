@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from typing import Optional, Tuple
+import time
 
 import requests
 from flask import Flask, redirect, render_template, request, url_for, flash
@@ -82,6 +83,25 @@ def init_db() -> None:
 # Ensure tables exist at import time (Flask 3 removed before_first_request)
 init_db()
 
+#
+# --- Lightweight in-memory price cache (per-process) ---
+#
+# { "BHP.AX": (timestamp, (price, prev_close, change)) }
+PRICE_CACHE: dict[str, tuple[float, tuple[Optional[float], Optional[float], Optional[float]]]] = {}
+# Cache TTL in seconds
+PRICE_TTL_SECONDS = 120  # adjust to taste (e.g. 300 = 5 minutes)
+
+def _cache_get(ticker: str):
+    entry = PRICE_CACHE.get(ticker)
+    if not entry:
+        return None
+    ts, triple = entry
+    if time.time() - ts <= PRICE_TTL_SECONDS:
+        return triple
+    return None
+
+def _cache_set(ticker: str, triple):
+    PRICE_CACHE[ticker] = (time.time(), triple)
 
 def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
@@ -94,6 +114,11 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
 
     Returns (current_price, previous_close, change) or (None, None, None).
     """
+       # 1) Try cache first to avoid hammering APIs
+    cached = _cache_get(ticker)
+    if cached is not None:
+        return cached
+
     rapidapi_key = os.environ.get("RAPIDAPI_KEY")
 
     # --- RapidAPI preferred path ---
@@ -119,9 +144,15 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
                 prev = r.get("regularMarketPreviousClose")
                 change = r.get("regularMarketChange")
                 if price is not None or prev is not None or change is not None:
-                    return price, prev, change
+                    triple = (price, prev, change)
+                    _cache_set(ticker, triple)
+                    return triple
         except Exception as e:
             print(f"[DEBUG] quotes error for {ticker}: {e}")
+            # If rate-limited and we have a cached value, use it
+            cached = _cache_get(ticker)
+            if cached is not None:
+                return cached
 
         # 2) Fallback: stock/v2/get-summary
         try:
@@ -138,16 +169,22 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
             prev_close = (price_info.get("regularMarketPreviousClose") or {}).get("raw")
             change = (price_info.get("regularMarketChange") or {}).get("raw")
             if price is not None or prev_close is not None or change is not None:
-                return price, prev_close, change
+                triple = (price, prev_close, change)
+                _cache_set(ticker, triple)
+                return triple
         except Exception as e:
             print(f"[DEBUG] summary error for {ticker}: {e}")
+            cached = _cache_get(ticker)
+            if cached is not None:
+                return cached
 
     # --- Public Yahoo fallback ---
     try:
         url = "https://query1.finance.yahoo.com/v7/finance/quote"
         params = {"symbols": ticker}
 
-        resp = requests.get(url, params=params, timeout=8)
+        # Add UA — sometimes helps avoid 429/blocks on public endpoint
+        resp = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
         resp.raise_for_status()
         data = resp.json()
         print(f"[DEBUG] public quote for {ticker}: {data}")
@@ -160,8 +197,18 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
                 r.get("regularMarketPreviousClose"),
                 r.get("regularMarketChange"),
             )
+                     triple = (
+                r.get("regularMarketPrice"),
+                r.get("regularMarketPreviousClose"),
+                r.get("regularMarketChange"),
+            )
+            _cache_set(ticker, triple)
+            return triple
     except Exception as e:
         print(f"[DEBUG] public quote error for {ticker}: {e}")
+        cached = _cache_get(ticker)
+        if cached is not None:
+            return cached
 
     return None, None, None
 
