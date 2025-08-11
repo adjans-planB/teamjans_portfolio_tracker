@@ -82,15 +82,15 @@ else:
 DB_IS_POSTGRES = engine.url.get_backend_name() == "postgresql"
 
 def init_db() -> None:
-"""
-Initialise the database if tables do not exist.
+    """ 
+    Initialise the database if tables do not exist.
 
-For PostgreSQL we use SERIAL primary keys and boolean types; for
-SQLite we stick to INTEGER primary keys with AUTOINCREMENT and
-integer flags for booleans.  This function runs within a
-transactional context so that table creation statements are
-committed automatically.
-"""
+    For PostgreSQL we use SERIAL primary keys and boolean types; for
+    SQLite we stick to INTEGER primary keys with AUTOINCREMENT and
+    integer flags for booleans.  This function runs within a
+    transactional context so that table creation statements are
+    committed automatically.
+    """
 if DB_IS_POSTGRES:
     create_portfolios = (
         "CREATE TABLE IF NOT EXISTS portfolios ("
