@@ -585,5 +585,5 @@ return redirect(url_for("index"))
 
 
 if __name__ == "__main__":
-# When executed directly, run the development server.
+    # When executed directly, run the development server.
 app.run(debug=True)
