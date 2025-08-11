@@ -197,7 +197,7 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
                 r.get("regularMarketPreviousClose"),
                 r.get("regularMarketChange"),
             )
-                     triple = (
+            triple = (
                 r.get("regularMarketPrice"),
                 r.get("regularMarketPreviousClose"),
                 r.get("regularMarketChange"),
