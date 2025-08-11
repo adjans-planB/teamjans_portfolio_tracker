@@ -70,11 +70,11 @@ DATABASE = os.path.join(os.path.dirname(__file__), "portfolio.db")
 # URL starting with "postgres://", which SQLAlchemy 2.x doesn't recognise.
 db_url = os.environ.get("DATABASE_URL")
 if db_url:
-if db_url.startswith("postgres://"):
-    db_url = db_url.replace("postgres://", "postgresql://", 1)
-engine = create_engine(db_url, future=True)
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql://", 1)
+        engine = create_engine(db_url, future=True)
 else:
-engine = create_engine(f"sqlite:///{DATABASE}", future=True)
+    engine = create_engine(f"sqlite:///{DATABASE}", future=True)
 
 # Determine whether we are using PostgreSQL (for type handling and SQL
 # differences).  This allows us to adjust default values and parameter
