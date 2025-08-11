@@ -184,7 +184,7 @@ if rapidapi_key:
         resp = requests.get(market_url, headers=headers, params=params, timeout=6)
         resp.raise_for_status()
         data = resp.json()
-    print(f"[DEBUG] Primary API response for {ticker}: {data}")
+        print(f"[DEBUG] Primary API response for {ticker}: {data}")
 
         results = data.get("quoteResponse", {}).get("result", [])
         if results:
@@ -228,7 +228,7 @@ try:
             result.get("regularMarketPreviousClose"),
             result.get("regularMarketChange"),
         )
-print(f"[DEBUG] Public Yahoo fallback for {ticker}: {data}")
+    print(f"[DEBUG] Public Yahoo fallback for {ticker}: {data}")
 
 
 except Exception:
