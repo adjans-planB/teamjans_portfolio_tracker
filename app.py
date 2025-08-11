@@ -140,28 +140,28 @@ init_db()
 
 
 def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-"""
-Retrieve current price, previous close and change for a ticker.
+    """
+    Retrieve current price, previous close and change for a ticker.
 
-The function first attempts to query the Yahoo Finance API via the
-RapidAPI gateway when a `RAPIDAPI_KEY` environment variable is
-provided.  RapidAPI offers a more reliable feed that is less
-susceptible to rate limiting.  If no key is present it falls back
-to Yahoo Finance’s public quote endpoint.  On success it returns a
-tuple ``(current_price, previous_close, change)``; otherwise
-`(None, None, None)`.
+    The function first attempts to query the Yahoo Finance API via the
+    RapidAPI gateway when a `RAPIDAPI_KEY` environment variable is
+    provided.  RapidAPI offers a more reliable feed that is less
+    susceptible to rate limiting.  If no key is present it falls back
+    to Yahoo Finance’s public quote endpoint.  On success it returns a
+    tuple ``(current_price, previous_close, change)``; otherwise
+    `(None, None, None)`.
 
-Parameters
-----------
-ticker : str
-    The stock or ETF ticker (e.g. "BHP.AX" for BHP Group on the ASX).
+    Parameters
+    ----------
+    ticker : str
+        The stock or ETF ticker (e.g. "BHP.AX" for BHP Group on the ASX).
 
-Returns
--------
-Tuple[Optional[float], Optional[float], Optional[float]]
-    A tuple of ``(current_price, previous_close, change)`` where any
-    element may be ``None`` if unavailable.
-"""
+    Returns
+    -------
+    Tuple[Optional[float], Optional[float], Optional[float]]
+        A tuple of ``(current_price, previous_close, change)`` where any
+        element may be ``None`` if unavailable.
+    """
 rapidapi_key = os.environ.get("RAPIDAPI_KEY")
 # Attempt RapidAPI if key provided
 if rapidapi_key:
@@ -237,9 +237,9 @@ return None, None, None
 
 
 def calculate_portfolio_summary(portfolio: dict) -> dict:
-"""
-Compute summary statistics for a single portfolio.
-"""
+    """
+    Compute summary statistics for a single portfolio.
+    """
 unsold_val = False if DB_IS_POSTGRES else 0
 with engine.connect() as conn:
     holdings = (
@@ -295,7 +295,7 @@ return {
 
 @app.route("/")
 def index():
-"""Display the dashboard with a summary of all portfolios."""
+    """Display the dashboard with a summary of all portfolios."""
 # Retrieve all portfolios.  Use `.mappings().all()` to return a list of
 # dictionaries keyed by column names.  This allows us to treat rows
 # similarly regardless of backend.
@@ -307,7 +307,7 @@ return render_template("index.html", portfolios=summaries)
 
 @app.route("/portfolio/<int:portfolio_id>")
 def view_portfolio(portfolio_id: int):
-"""Display a single portfolio with its holdings and actions."""
+    """Display a single portfolio with its holdings and actions."""
 # Determine unsold/sold flag values based on backend
 unsold_val = False if DB_IS_POSTGRES else 0
 sold_val = True if DB_IS_POSTGRES else 1
@@ -392,7 +392,7 @@ return render_template(
 
 @app.route("/create_portfolio", methods=["POST"])
 def create_portfolio():
-"""Handle portfolio creation."""
+    """Handle portfolio creation."""
 name = request.form.get("name", "").strip()
 if not name:
     flash("Portfolio name is required.", "danger")
@@ -410,7 +410,7 @@ return redirect(url_for("index"))
 
 @app.route("/portfolio/<int:portfolio_id>/add_holding", methods=["POST"])
 def add_holding(portfolio_id: int):
-"""Add a new holding to the specified portfolio."""
+    """Add a new holding to the specified portfolio."""
 ticker = request.form.get("ticker", "").strip().upper()
 quantity = request.form.get("quantity")
 price = request.form.get("purchase_price")
@@ -478,14 +478,14 @@ return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
 "/portfolio/<int:portfolio_id>/sell_holding/<int:holding_id>", methods=["POST"]
 )
 def sell_holding(portfolio_id: int, holding_id: int):
-"""
-Mark a holding as sold and credit the sale proceeds to the cash balance.
+    """
+    Mark a holding as sold and credit the sale proceeds to the cash balance.
 
-The sale price is taken from the current market price at the moment
-the user presses the sell button.  If a live price cannot be
-retrieved, the purchase price is used instead.  The record remains
-in the holdings table but is flagged as sold.
-"""
+    The sale price is taken from the current market price at the moment
+    the user presses the sell button.  If a live price cannot be
+    retrieved, the purchase price is used instead.  The record remains
+    in the holdings table but is flagged as sold.
+    """
 # Determine the sold flag value for the target database
 sold_val = True if DB_IS_POSTGRES else 1
 unsold_val = False if DB_IS_POSTGRES else 0
@@ -548,7 +548,7 @@ return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
 "/portfolio/<int:portfolio_id>/update_cash", methods=["POST"]
 )
 def update_cash(portfolio_id: int):
-"""Manually update the cash balance of a portfolio."""
+    """Manually update the cash balance of a portfolio."""
 new_balance = request.form.get("cash_balance")
 try:
     balance_val = float(new_balance)
@@ -569,7 +569,7 @@ return redirect(url_for("view_portfolio", portfolio_id=portfolio_id))
 "/portfolio/<int:portfolio_id>/delete", methods=["POST"]
 )
 def delete_portfolio(portfolio_id: int):
-"""Delete a portfolio and all its holdings."""
+    """Delete a portfolio and all its holdings."""
 # Remove the portfolio and all its holdings in a single transaction
 with engine.begin() as conn:
     conn.execute(
