@@ -83,19 +83,23 @@ def init_db() -> None:
 # Ensure tables exist at import time (Flask 3 removed before_first_request)
 init_db()
 
-#
-# --- Lightweight in-memory price cache (per-process) ---
-#
-# { "BHP.AX": (timestamp, (price, prev_close, change)) }
+import time
+
+# Simple in-memory cache: { "BHP.AX": (timestamp, (price, prev, change)) }
 PRICE_CACHE: dict[str, tuple[float, tuple[Optional[float], Optional[float], Optional[float]]]] = {}
-# Cache TTL in seconds
-PRICE_TTL_SECONDS = 120  # adjust to taste (e.g. 300 = 5 minutes)
+
+# Cache time-to-live (seconds)
+PRICE_TTL_SECONDS = 600  # 10 minutes
+
+# Backoff window after a 429 (seconds)
+RATE_LIMIT_COOLDOWN = 120
+RATE_LIMIT_UNTIL: float = 0.0
 
 def _cache_get(ticker: str):
-    entry = PRICE_CACHE.get(ticker)
-    if not entry:
+    tup = PRICE_CACHE.get(ticker)
+    if not tup:
         return None
-    ts, triple = entry
+    ts, triple = tup
     if time.time() - ts <= PRICE_TTL_SECONDS:
         return triple
     return None
@@ -103,21 +107,104 @@ def _cache_get(ticker: str):
 def _cache_set(ticker: str, triple):
     PRICE_CACHE[ticker] = (time.time(), triple)
 
+def _rate_limited() -> bool:
+    return time.time() < RATE_LIMIT_UNTIL
+
+def _set_rate_limit_cooldown():
+    global RATE_LIMIT_UNTIL
+    RATE_LIMIT_UNTIL = time.time() + RATE_LIMIT_COOLDOWN
+
+
+def fetch_quotes_batch(tickers: list[str]) -> dict[str, tuple[Optional[float], Optional[float], Optional[float]]]:
+    """
+    Fetch quotes for multiple tickers in one call via RapidAPI market/v2/get-quotes.
+    Uses cache for already-fresh tickers.
+    Returns a dict: {ticker: (price, prev, change)} with None if unavailable.
+    """
+    result: dict[str, tuple[Optional[float], Optional[float], Optional[float]]] = {}
+
+    # Fill from cache first
+    missing: list[str] = []
+    for t in tickers:
+        cached = _cache_get(t)
+        if cached is not None:
+            result[t] = cached
+        else:
+            missing.append(t)
+
+    # If everything satisfied by cache or we are in cooldown, return early
+    if not missing or _rate_limited():
+        return result
+
+    rapidapi_key = os.environ.get("RAPIDAPI_KEY")
+    if not rapidapi_key:
+        # No RapidAPI — return what we have; remaining will be handled by caller logic
+        return result
+
+    try:
+        headers = {
+            "x-rapidapi-host": "apidojo-yahoo-finance-v1.p.rapidapi.com",
+            "x-rapidapi-key": rapidapi_key,
+        }
+        market_url = "https://apidojo-yahoo-finance-v1.p.rapidapi.com/market/v2/get-quotes"
+        params = {"region": "AU", "symbols": ",".join(missing)}
+
+        resp = requests.get(market_url, headers=headers, params=params, timeout=8)
+        resp.raise_for_status()
+        data = resp.json()
+        print(f"[DEBUG] batch get-quotes: {params['symbols']} -> {data}")
+
+        quotes = data.get("quoteResponse", {}).get("result", [])
+        # Map results by symbol
+        by_symbol = {q.get("symbol"): q for q in quotes if q.get("symbol")}
+
+        for t in missing:
+            q = by_symbol.get(t)
+            if q:
+                price = q.get("regularMarketPrice")
+                prev = q.get("regularMarketPreviousClose")
+                change = q.get("regularMarketChange")
+                triple = (price, prev, change)
+                _cache_set(t, triple)
+                result[t] = triple
+            else:
+                # Not returned — mark as missing
+                result[t] = (None, None, None)
+
+    except requests.HTTPError as e:
+        # If 429 — set cooldown and return current (cache-first) results
+        if getattr(e.response, "status_code", None) == 429:
+            print("[DEBUG] batch quotes rate-limited (429); entering cooldown")
+            _set_rate_limit_cooldown()
+            # return whatever we have (cache), missing remain None
+            for t in missing:
+                result.setdefault(t, (None, None, None))
+            return result
+        print(f"[DEBUG] batch quotes HTTP error: {e}")
+        for t in missing:
+            result.setdefault(t, (None, None, None))
+    except Exception as e:
+        print(f"[DEBUG] batch quotes error: {e}")
+        for t in missing:
+            result.setdefault(t, (None, None, None))
+
+    return result
+
+
+
 def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
-    Retrieve current price, previous close and change for a ticker.
-
-    Tries RapidAPI (Yahoo Finance via APIDojo) first:
-      1) market/v2/get-quotes
-      2) stock/v2/get-summary (fallback)
-    Then falls back to Yahoo's public quote endpoint.
-
+    Single-ticker fetch with cache + cooldown awareness.
     Returns (current_price, previous_close, change) or (None, None, None).
     """
-       # 1) Try cache first to avoid hammering APIs
+    # 1) Try cache first
     cached = _cache_get(ticker)
     if cached is not None:
         return cached
+
+    # If we're in cooldown after a 429, don't call out
+    if _rate_limited():
+        return None, None, None
 
     rapidapi_key = os.environ.get("RAPIDAPI_KEY")
 
@@ -147,10 +234,18 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
                     triple = (price, prev, change)
                     _cache_set(ticker, triple)
                     return triple
+        except requests.HTTPError as e:
+            if getattr(e.response, "status_code", None) == 429:
+                print(f"[DEBUG] quotes 429 for {ticker}; entering cooldown")
+                _set_rate_limit_cooldown()
+                if cached is not None:
+                    return cached
+            else:
+                print(f"[DEBUG] quotes error for {ticker}: {e}")
+            if cached is not None:
+                return cached
         except Exception as e:
             print(f"[DEBUG] quotes error for {ticker}: {e}")
-            # If rate-limited and we have a cached value, use it
-            cached = _cache_get(ticker)
             if cached is not None:
                 return cached
 
@@ -172,9 +267,18 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
                 triple = (price, prev_close, change)
                 _cache_set(ticker, triple)
                 return triple
+        except requests.HTTPError as e:
+            if getattr(e.response, "status_code", None) == 429:
+                print(f"[DEBUG] summary 429 for {ticker}; entering cooldown")
+                _set_rate_limit_cooldown()
+                if cached is not None:
+                    return cached
+            else:
+                print(f"[DEBUG] summary error for {ticker}: {e}")
+            if cached is not None:
+                return cached
         except Exception as e:
             print(f"[DEBUG] summary error for {ticker}: {e}")
-            cached = _cache_get(ticker)
             if cached is not None:
                 return cached
 
@@ -182,9 +286,12 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
     try:
         url = "https://query1.finance.yahoo.com/v7/finance/quote"
         params = {"symbols": ticker}
-
-        # Add UA — sometimes helps avoid 429/blocks on public endpoint
-        resp = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        resp = requests.get(
+            url,
+            params=params,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8,
+        )
         resp.raise_for_status()
         data = resp.json()
         print(f"[DEBUG] public quote for {ticker}: {data}")
@@ -192,11 +299,6 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
         results = data.get("quoteResponse", {}).get("result", [])
         if results:
             r = results[0]
-            return (
-                r.get("regularMarketPrice"),
-                r.get("regularMarketPreviousClose"),
-                r.get("regularMarketChange"),
-            )
             triple = (
                 r.get("regularMarketPrice"),
                 r.get("regularMarketPreviousClose"),
@@ -204,20 +306,30 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
             )
             _cache_set(ticker, triple)
             return triple
+    except requests.HTTPError as e:
+        if getattr(e.response, "status_code", None) == 429:
+            print(f"[DEBUG] public 429 for {ticker}; entering cooldown")
+            _set_rate_limit_cooldown()
+            if cached is not None:
+                return cached
+        else:
+            print(f"[DEBUG] public quote error for {ticker}: {e}")
+        if cached is not None:
+            return cached
     except Exception as e:
         print(f"[DEBUG] public quote error for {ticker}: {e}")
-        cached = _cache_get(ticker)
         if cached is not None:
             return cached
 
     return None, None, None
 
 
+
 def calculate_portfolio_summary(portfolio: dict) -> dict:
     """
     Compute summary statistics for a single portfolio:
       cash_balance (float),
-      positions_value (float) — value of open holdings (excludes cash),
+      positions_value (float) — open holdings only,
       net_worth (float) = cash + positions_value,
       total_profit (float) since purchase,
       daily_profit (float) since previous close.
@@ -233,6 +345,10 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
             .all()
         )
 
+    # Batch fetch quotes once for all tickers in this portfolio
+    tickers = [h["ticker"] for h in holdings]
+    quotes_map = fetch_quotes_batch(tickers)
+
     positions_value = 0.0
     total_profit = 0.0
     daily_profit = 0.0
@@ -241,7 +357,7 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
         ticker = h["ticker"]
         quantity = float(h["quantity"])
         purchase_price = float(h["purchase_price"])
-        current_price, prev_close, change = get_stock_price(ticker)
+        current_price, prev_close, change = quotes_map.get(ticker, (None, None, None))
 
         if current_price is not None:
             effective_price = float(current_price)
@@ -274,6 +390,7 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
     }
 
 
+
 @app.route("/")
 def index():
     """Dashboard with summaries of all portfolios."""
@@ -281,6 +398,11 @@ def index():
         portfolios = conn.execute(text("SELECT * FROM portfolios")).mappings().all()
     summaries = [calculate_portfolio_summary(p) for p in portfolios]
     return render_template("index.html", portfolios=summaries)
+    
+@app.route("/healthz")
+def healthz():
+    # Cheap health endpoint for uptime monitors — no DB or API calls
+    return "ok", 200
 
 
 @app.route("/portfolio/<int:portfolio_id>")
@@ -319,9 +441,13 @@ def view_portfolio(portfolio_id: int):
             .all()
         )
 
+        # Batch fetch quotes for visible positions
+    tickers = [h["ticker"] for h in holdings]
+    quotes_map = fetch_quotes_batch(tickers)
+
     holding_rows = []
     for h in holdings:
-        current_price, prev_close, change = get_stock_price(h["ticker"])
+        current_price, prev_close, change = quotes_map.get(h["ticker"], (None, None, None))
 
         if current_price is not None:
             effective_price = float(current_price)
@@ -351,6 +477,7 @@ def view_portfolio(portfolio_id: int):
             metrics["profit_daily"] = (float(current_price) - float(prev_close)) * qty
 
         holding_rows.append(metrics)
+
 
     summary = calculate_portfolio_summary(portfolio)
     return render_template(
