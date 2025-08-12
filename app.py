@@ -9,9 +9,9 @@ cash balances, and P/L. Supports SQLite locally and PostgreSQL on Render.
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime
 from typing import Optional, Tuple
-import time
 
 import requests
 from flask import Flask, redirect, render_template, request, url_for, flash
@@ -56,6 +56,14 @@ def init_db() -> None:
             "purchase_date DATE DEFAULT CURRENT_DATE, "
             "sold BOOLEAN DEFAULT FALSE)"
         )
+        create_last_quotes = (
+            "CREATE TABLE IF NOT EXISTS last_quotes ("
+            "ticker TEXT PRIMARY KEY, "
+            "price NUMERIC, "
+            "prev_close NUMERIC, "
+            "\"change\" NUMERIC, "
+            "updated_at TIMESTAMPTZ DEFAULT NOW())"
+        )
     else:
         create_portfolios = (
             "CREATE TABLE IF NOT EXISTS portfolios ("
@@ -74,18 +82,29 @@ def init_db() -> None:
             "sold INTEGER DEFAULT 0, "
             "FOREIGN KEY (portfolio_id) REFERENCES portfolios (id))"
         )
+        create_last_quotes = (
+            "CREATE TABLE IF NOT EXISTS last_quotes ("
+            "ticker TEXT PRIMARY KEY, "
+            "price REAL, "
+            "prev_close REAL, "
+            "\"change\" REAL, "
+            "updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+        )
 
     with engine.begin() as conn:
         conn.execute(text(create_portfolios))
         conn.execute(text(create_holdings))
+        conn.execute(text(create_last_quotes))
 
 
 # Ensure tables exist at import time (Flask 3 removed before_first_request)
 init_db()
 
-import time
+# ----------------------------
+# In-memory price cache & rate limit cooldown
+# ----------------------------
 
-# Simple in-memory cache: { "BHP.AX": (timestamp, (price, prev, change)) }
+# { "BHP.AX": (timestamp, (price, prev_close, change)) }
 PRICE_CACHE: dict[str, tuple[float, tuple[Optional[float], Optional[float], Optional[float]]]] = {}
 
 # Cache time-to-live (seconds)
@@ -95,35 +114,90 @@ PRICE_TTL_SECONDS = 600  # 10 minutes
 RATE_LIMIT_COOLDOWN = 120
 RATE_LIMIT_UNTIL: float = 0.0
 
+
 def _cache_get(ticker: str):
-    tup = PRICE_CACHE.get(ticker)
-    if not tup:
+    entry = PRICE_CACHE.get(ticker)
+    if not entry:
         return None
-    ts, triple = tup
+    ts, triple = entry
     if time.time() - ts <= PRICE_TTL_SECONDS:
         return triple
     return None
 
+
 def _cache_set(ticker: str, triple):
     PRICE_CACHE[ticker] = (time.time(), triple)
 
+
 def _rate_limited() -> bool:
     return time.time() < RATE_LIMIT_UNTIL
+
 
 def _set_rate_limit_cooldown():
     global RATE_LIMIT_UNTIL
     RATE_LIMIT_UNTIL = time.time() + RATE_LIMIT_COOLDOWN
 
 
+# ----------------------------
+# Persistent quote store (DB)
+# ----------------------------
+def _db_get_quote(ticker: str):
+    with engine.connect() as conn:
+        row = (
+            conn.execute(
+                text("SELECT price, prev_close, \"change\" FROM last_quotes WHERE ticker = :t"),
+                {"t": ticker},
+            )
+            .first()
+        )
+    if row:
+        price, prev_close, change = row
+        return (
+            float(price) if price is not None else None,
+            float(prev_close) if prev_close is not None else None,
+            float(change) if change is not None else None,
+        )
+    return None
+
+
+def _db_set_quote(ticker: str, triple):
+    price, prev_close, change = triple
+    if DB_IS_POSTGRES:
+        sql = (
+            "INSERT INTO last_quotes (ticker, price, prev_close, \"change\", updated_at) "
+            "VALUES (:t, :p, :pc, :c, NOW()) "
+            "ON CONFLICT (ticker) DO UPDATE SET "
+            "price = EXCLUDED.price, prev_close = EXCLUDED.prev_close, "
+            "\"change\" = EXCLUDED.\"change\", updated_at = NOW()"
+        )
+    else:
+        # SQLite upsert
+        sql = (
+            "INSERT INTO last_quotes (ticker, price, prev_close, \"change\", updated_at) "
+            "VALUES (:t, :p, :pc, :c, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(ticker) DO UPDATE SET "
+            "price = excluded.price, prev_close = excluded.prev_close, "
+            "\"change\" = excluded.\"change\", updated_at = CURRENT_TIMESTAMP"
+        )
+    with engine.begin() as conn:
+        conn.execute(
+            text(sql),
+            {"t": ticker, "p": price, "pc": prev_close, "c": change},
+        )
+
+
+# ----------------------------
+# Batch quotes fetch via RapidAPI
+# ----------------------------
 def fetch_quotes_batch(tickers: list[str]) -> dict[str, tuple[Optional[float], Optional[float], Optional[float]]]:
     """
     Fetch quotes for multiple tickers in one call via RapidAPI market/v2/get-quotes.
-    Uses cache for already-fresh tickers.
-    Returns a dict: {ticker: (price, prev, change)} with None if unavailable.
+    Uses cache first; writes successes to DB; falls back to DB on rate limits.
+    Returns: {ticker: (price, prev, change)}; values may be None.
     """
     result: dict[str, tuple[Optional[float], Optional[float], Optional[float]]] = {}
 
-    # Fill from cache first
+    # From cache first
     missing: list[str] = []
     for t in tickers:
         cached = _cache_get(t)
@@ -132,13 +206,21 @@ def fetch_quotes_batch(tickers: list[str]) -> dict[str, tuple[Optional[float], O
         else:
             missing.append(t)
 
-    # If everything satisfied by cache or we are in cooldown, return early
+    # If all covered by cache or we're in cooldown, fill the rest from DB and return
     if not missing or _rate_limited():
+        for t in list(missing):
+            dbq = _db_get_quote(t)
+            if dbq is not None:
+                result[t] = dbq
         return result
 
     rapidapi_key = os.environ.get("RAPIDAPI_KEY")
     if not rapidapi_key:
-        # No RapidAPI — return what we have; remaining will be handled by caller logic
+        # No RapidAPI — use DB fallback for missing
+        for t in list(missing):
+            dbq = _db_get_quote(t)
+            if dbq is not None:
+                result[t] = dbq
         return result
 
     try:
@@ -155,7 +237,6 @@ def fetch_quotes_batch(tickers: list[str]) -> dict[str, tuple[Optional[float], O
         print(f"[DEBUG] batch get-quotes: {params['symbols']} -> {data}")
 
         quotes = data.get("quoteResponse", {}).get("result", [])
-        # Map results by symbol
         by_symbol = {q.get("symbol"): q for q in quotes if q.get("symbol")}
 
         for t in missing:
@@ -166,51 +247,59 @@ def fetch_quotes_batch(tickers: list[str]) -> dict[str, tuple[Optional[float], O
                 change = q.get("regularMarketChange")
                 triple = (price, prev, change)
                 _cache_set(t, triple)
+                _db_set_quote(t, triple)
                 result[t] = triple
             else:
-                # Not returned — mark as missing
-                result[t] = (None, None, None)
+                dbq = _db_get_quote(t)
+                result[t] = dbq if dbq is not None else (None, None, None)
 
     except requests.HTTPError as e:
-        # If 429 — set cooldown and return current (cache-first) results
         if getattr(e.response, "status_code", None) == 429:
             print("[DEBUG] batch quotes rate-limited (429); entering cooldown")
             _set_rate_limit_cooldown()
-            # return whatever we have (cache), missing remain None
             for t in missing:
-                result.setdefault(t, (None, None, None))
+                if t not in result:
+                    dbq = _db_get_quote(t)
+                    result[t] = dbq if dbq is not None else (None, None, None)
             return result
         print(f"[DEBUG] batch quotes HTTP error: {e}")
         for t in missing:
-            result.setdefault(t, (None, None, None))
+            if t not in result:
+                dbq = _db_get_quote(t)
+                result[t] = dbq if dbq is not None else (None, None, None)
     except Exception as e:
         print(f"[DEBUG] batch quotes error: {e}")
         for t in missing:
-            result.setdefault(t, (None, None, None))
+            if t not in result:
+                dbq = _db_get_quote(t)
+                result[t] = dbq if dbq is not None else (None, None, None)
 
     return result
 
 
-
+# ----------------------------
+# Single-ticker fetch (uses cache/DB/cooldown)
+# ----------------------------
 def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     """
-    Single-ticker fetch with cache + cooldown awareness.
+    Single-ticker fetch with cache + cooldown awareness + DB fallback.
     Returns (current_price, previous_close, change) or (None, None, None).
     """
-    # 1) Try cache first
+    # Cache first
     cached = _cache_get(ticker)
     if cached is not None:
         return cached
 
-    # If we're in cooldown after a 429, don't call out
+    # If cooling down after a 429, try DB before giving up
     if _rate_limited():
-        return None, None, None
+        dbq = _db_get_quote(ticker)
+        return dbq if dbq is not None else (None, None, None)
 
     rapidapi_key = os.environ.get("RAPIDAPI_KEY")
 
-    # --- RapidAPI preferred path ---
+    # RapidAPI preferred path
     if rapidapi_key:
-        # 1) Primary: market/v2/get-quotes
+        # market/v2/get-quotes
         try:
             headers = {
                 "x-rapidapi-host": "apidojo-yahoo-finance-v1.p.rapidapi.com",
@@ -233,6 +322,7 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
                 if price is not None or prev is not None or change is not None:
                     triple = (price, prev, change)
                     _cache_set(ticker, triple)
+                    _db_set_quote(ticker, triple)
                     return triple
         except requests.HTTPError as e:
             if getattr(e.response, "status_code", None) == 429:
@@ -240,16 +330,25 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
                 _set_rate_limit_cooldown()
                 if cached is not None:
                     return cached
+                dbq = _db_get_quote(ticker)
+                if dbq is not None:
+                    return dbq
             else:
                 print(f"[DEBUG] quotes error for {ticker}: {e}")
             if cached is not None:
                 return cached
+            dbq = _db_get_quote(ticker)
+            if dbq is not None:
+                return dbq
         except Exception as e:
             print(f"[DEBUG] quotes error for {ticker}: {e}")
             if cached is not None:
                 return cached
+            dbq = _db_get_quote(ticker)
+            if dbq is not None:
+                return dbq
 
-        # 2) Fallback: stock/v2/get-summary
+        # stock/v2/get-summary
         try:
             summary_url = "https://apidojo-yahoo-finance-v1.p.rapidapi.com/stock/v2/get-summary"
             params2 = {"symbol": ticker, "region": "AU"}
@@ -266,6 +365,7 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
             if price is not None or prev_close is not None or change is not None:
                 triple = (price, prev_close, change)
                 _cache_set(ticker, triple)
+                _db_set_quote(ticker, triple)
                 return triple
         except requests.HTTPError as e:
             if getattr(e.response, "status_code", None) == 429:
@@ -273,16 +373,25 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
                 _set_rate_limit_cooldown()
                 if cached is not None:
                     return cached
+                dbq = _db_get_quote(ticker)
+                if dbq is not None:
+                    return dbq
             else:
                 print(f"[DEBUG] summary error for {ticker}: {e}")
             if cached is not None:
                 return cached
+            dbq = _db_get_quote(ticker)
+            if dbq is not None:
+                return dbq
         except Exception as e:
             print(f"[DEBUG] summary error for {ticker}: {e}")
             if cached is not None:
                 return cached
+            dbq = _db_get_quote(ticker)
+            if dbq is not None:
+                return dbq
 
-    # --- Public Yahoo fallback ---
+    # Public Yahoo fallback
     try:
         url = "https://query1.finance.yahoo.com/v7/finance/quote"
         params = {"symbols": ticker}
@@ -305,6 +414,7 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
                 r.get("regularMarketChange"),
             )
             _cache_set(ticker, triple)
+            _db_set_quote(ticker, triple)
             return triple
     except requests.HTTPError as e:
         if getattr(e.response, "status_code", None) == 429:
@@ -312,17 +422,25 @@ def get_stock_price(ticker: str) -> Tuple[Optional[float], Optional[float], Opti
             _set_rate_limit_cooldown()
             if cached is not None:
                 return cached
+            dbq = _db_get_quote(ticker)
+            if dbq is not None:
+                return dbq
         else:
             print(f"[DEBUG] public quote error for {ticker}: {e}")
         if cached is not None:
             return cached
+        dbq = _db_get_quote(ticker)
+        if dbq is not None:
+            return dbq
     except Exception as e:
         print(f"[DEBUG] public quote error for {ticker}: {e}")
         if cached is not None:
             return cached
+        dbq = _db_get_quote(ticker)
+        if dbq is not None:
+            return dbq
 
     return None, None, None
-
 
 
 def calculate_portfolio_summary(portfolio: dict) -> dict:
@@ -390,7 +508,6 @@ def calculate_portfolio_summary(portfolio: dict) -> dict:
     }
 
 
-
 @app.route("/")
 def index():
     """Dashboard with summaries of all portfolios."""
@@ -398,7 +515,8 @@ def index():
         portfolios = conn.execute(text("SELECT * FROM portfolios")).mappings().all()
     summaries = [calculate_portfolio_summary(p) for p in portfolios]
     return render_template("index.html", portfolios=summaries)
-    
+
+
 @app.route("/healthz")
 def healthz():
     # Cheap health endpoint for uptime monitors — no DB or API calls
@@ -441,7 +559,7 @@ def view_portfolio(portfolio_id: int):
             .all()
         )
 
-        # Batch fetch quotes for visible positions
+    # Batch fetch quotes for visible positions
     tickers = [h["ticker"] for h in holdings]
     quotes_map = fetch_quotes_batch(tickers)
 
@@ -477,7 +595,6 @@ def view_portfolio(portfolio_id: int):
             metrics["profit_daily"] = (float(current_price) - float(prev_close)) * qty
 
         holding_rows.append(metrics)
-
 
     summary = calculate_portfolio_summary(portfolio)
     return render_template(
