@@ -1,0 +1,27 @@
+name: Send Email from N8N
+
+on:
+  repository_dispatch:
+    types: [send_email]
+
+jobs:
+  send-email:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Send email
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_SUBJECT: ${{ github.event.client_payload.subject }}
+          EMAIL_BODY: ${{ github.event.client_payload.body }}
+          EMAIL_TO: ${{ github.event.client_payload.to }}
+        run: python send_email.py
